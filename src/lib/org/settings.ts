@@ -8,6 +8,7 @@
 // `OrgBlueprint` is the full white-label spec the AI builder produces.
 // ─────────────────────────────────────────────────────────────────────────────
 
+import { clampForwardTimeout } from "../inbound/routing";
 import type { LeadFieldDef } from "../leads/field-schema";
 import { sanitizeExportTemplates, type ExportTemplate } from "../leads/export-spec";
 import { sanitizeReportViews, type ReportView } from "../reports/view-spec";
@@ -43,6 +44,30 @@ export interface AutomationWindow {
 }
 
 /** Unattended AI-calling schedule (server-side cron places the calls). */
+/**
+ * Inbound (return-call) handling for the org's dialing numbers.
+ * Routing decisions are pure — see src/lib/inbound/routing.ts.
+ */
+export interface InboundSettings {
+  /**
+   * "off"       — numbers stay write-only (today's behavior)
+   * "forward"   — answer, then ring the matched rep's personal phone
+   * "voicemail" — answer and take a message
+   * "ai"        — hand the caller to the ElevenLabs agent
+   */
+  mode: "off" | "forward" | "voicemail" | "ai";
+  /** Text the matched rep's personal phone when a call comes back. */
+  notifyRep: boolean;
+  /** Seconds the rep's phone rings before falling through to voicemail (5–60). */
+  forwardTimeoutSec: number;
+  /** Where to send calls with no matching rep. Empty ⇒ voicemail. */
+  fallbackNumber: string;
+  /** Spoken before connecting. `{org}` is interpolated. Empty ⇒ a neutral default. */
+  greeting: string;
+  /** Record the voicemail message the caller leaves. */
+  recordVoicemail: boolean;
+}
+
 export interface AutomationSettings {
   /** Master switch — nothing auto-dials unless this is on. */
   enabled: boolean;
@@ -296,6 +321,15 @@ export interface OrgSettings {
      * it ever misbehaves in production.
      */
     reservations: boolean;
+    /**
+     * What happens when someone rings one of the org's dialing numbers BACK.
+     *
+     * Every pool number used to be write-only: the dialer rang out from them and
+     * anyone returning the call was hung up on by the voice webhook's disabled
+     * direct-dial branch. Off by default — turning this on makes the numbers
+     * answer, which is a visible change in how the business behaves.
+     */
+    inbound: InboundSettings;
   };
   /**
    * Unattended AI calling schedule. When enabled, a server-side cron places AI
@@ -636,6 +670,17 @@ export const DEFAULT_ORG_SETTINGS: OrgSettings = {
     // The reservation engine is the default; orgs saved before it existed pick
     // it up here via mergeSettings (absent key → this default → ON).
     reservations: true,
+    // OFF: the numbers stay write-only until an admin decides they should
+    // answer. Turning it on changes how the business behaves to anyone who
+    // dials back, so it is never something an upgrade does on its own.
+    inbound: {
+      mode: "off",
+      notifyRep: true,
+      forwardTimeoutSec: 25,
+      fallbackNumber: "",
+      greeting: "",
+      recordVoicemail: true,
+    },
   },
   orchestration: { enabled: false },
   automation: {
@@ -756,6 +801,19 @@ export function mergeSettings(raw: unknown): OrgSettings {
       )
         ? s.dialing!.defaultMode
         : DEFAULT_ORG_SETTINGS.dialing.defaultMode,
+      // Nested object: the outer spread would replace it wholesale, so an org
+      // saved with `inbound: { mode: "forward" }` and nothing else would come
+      // back missing every other key and read as timeout 0 / notify off.
+      inbound: {
+        ...DEFAULT_ORG_SETTINGS.dialing.inbound,
+        ...(s.dialing?.inbound ?? {}),
+        mode: (["off", "forward", "voicemail", "ai"] as const).includes(
+          s.dialing?.inbound?.mode as "off",
+        )
+          ? s.dialing!.inbound!.mode
+          : DEFAULT_ORG_SETTINGS.dialing.inbound.mode,
+        forwardTimeoutSec: clampForwardTimeout(s.dialing?.inbound?.forwardTimeoutSec),
+      },
     },
     automation: {
       ...DEFAULT_ORG_SETTINGS.automation,

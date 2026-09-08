@@ -7,6 +7,7 @@ import {
   Flag,
   Loader2,
   PhoneCall,
+  PhoneIncoming,
   PhoneOff,
   RotateCcw,
   X,
@@ -36,6 +37,7 @@ import {
 } from "@/lib/callbacks/lanes";
 import type { CallbackBoardRow } from "@/lib/db/callbacks";
 import { dialDeepLink } from "@/lib/dialer/deep-link";
+import { isInboundCallback } from "@/lib/inbound/routing";
 import { cn, formatPhone, initials, relativeTime } from "@/lib/utils";
 import {
   ScheduleCallbackDialog,
@@ -229,6 +231,19 @@ function RowCard({
       </div>
 
       <div className="mt-2 flex flex-wrap items-center gap-1.5">
+        {/* A returned call outranks every scheduled promise on this board: the
+            rest are things WE said we'd do, this is someone who already picked
+            up the phone. Called out first so it can't be lost in a long list. */}
+        {isInboundCallback(row.reason) && (
+          <Badge
+            tone="success"
+            className="gap-1"
+            title="This person called one of your numbers back — you didn't schedule it."
+          >
+            <PhoneIncoming className="h-3 w-3" />
+            They called back
+          </Badge>
+        )}
         {lane === "overdue" && <EscalationBadge row={row} now={now} />}
         {row.campaignName && <Badge tone="neutral">{row.campaignName}</Badge>}
         {row.attemptCount > 0 && (

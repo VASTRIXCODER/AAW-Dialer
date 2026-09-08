@@ -1,6 +1,7 @@
 import { SettingsView } from "@/components/settings/settings-view";
 import { PageContainer, PageHeader } from "@/components/shared/page-header";
 import { getMyProfileSettings } from "@/lib/db/team";
+import { parseNotifyPrefs } from "@/lib/dialer/notify-prefs";
 import { parseDialerUserPrefs } from "@/lib/dialer/user-prefs";
 import { getViewer } from "@/lib/org/membership";
 
@@ -25,6 +26,7 @@ export default async function SettingsPage() {
         permissions={viewer.permissions}
         team={profile.team}
         dialerPrefs={parseDialerUserPrefs(profile.preferences)}
+        notifyPrefs={parseNotifyPrefs(profile.preferences)}
       />
     </PageContainer>
   );

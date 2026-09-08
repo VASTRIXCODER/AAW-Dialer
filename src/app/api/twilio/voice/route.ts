@@ -1,4 +1,16 @@
+import {
+  notifyRepOfInboundCall,
+  recordInboundCallback,
+  resolveInboundContext,
+} from "@/lib/db/inbound";
 import { elevenLabsConfig } from "@/lib/elevenlabs";
+import {
+  chooseInboundRoute,
+  classifyIncomingCall,
+  INBOUND_REASON_FORWARDED,
+  INBOUND_REASON_MESSAGE,
+  renderGreeting,
+} from "@/lib/inbound/routing";
 import {
   getPublicBaseUrl,
   getRestClient,
@@ -33,6 +45,139 @@ function say(message: string) {
 }
 
 /**
+ * A homeowner rang one of the org's dialing numbers back.
+ *
+ * Three things happen, in this order and for this reason:
+ *   1. The call is FILED on the Callbacks board, before anything else. Whatever
+ *      the caller does next — hangs up during the greeting, rings out, leaves a
+ *      message — the rep has a row saying they called. That row is the product;
+ *      the connection attempt is a bonus.
+ *   2. The rep is TEXTED, detached. An SMS round-trip must never sit between a
+ *      caller and the TwiML they are waiting on, so this is deliberately not
+ *      awaited.
+ *   3. The caller is ROUTED per the org's mode — rung through to the rep,
+ *      handed a voicemail box, or given to the AI agent.
+ *
+ * It must always return valid TwiML: every failure path here degrades to a
+ * spoken message, never a 500 (which Twilio reads aloud as a generic error).
+ */
+async function handleInboundCallback(opts: {
+  from: string;
+  to: string;
+  callSid: string;
+  req: Request;
+}): Promise<Response> {
+  const { from, to, callSid, req } = opts;
+  let ctx: Awaited<ReturnType<typeof resolveInboundContext>>;
+  try {
+    ctx = await resolveInboundContext({ from, to });
+  } catch {
+    return say("Thanks for calling. Please try us again shortly.");
+  }
+
+  const inbound = ctx.settings?.dialing.inbound;
+  // No org owns this number, or the org has left inbound off: say something
+  // human and hang up. Never the old "direct dialing is disabled" — that was
+  // written for a rep's console, not a homeowner returning a call.
+  if (!ctx.settings || !inbound || inbound.mode === "off") {
+    return say("Thanks for calling. Please try us again during business hours.");
+  }
+
+  const route = chooseInboundRoute({
+    mode: inbound.mode,
+    repPhone: ctx.repNotify.phone || null,
+    repForwardOptIn: ctx.repNotify.forwardCallback,
+    fallbackNumber: inbound.fallbackNumber,
+    timeoutSec: inbound.forwardTimeoutSec,
+  });
+
+  // (1) File it. Awaited — this is the deliverable.
+  await recordInboundCallback({
+    orgId: ctx.orgId,
+    ownerId: ctx.repId,
+    leadId: ctx.leadId,
+    leadName: ctx.leadName,
+    phone: from,
+    reason:
+      route.kind === "forward" ? INBOUND_REASON_FORWARDED : INBOUND_REASON_MESSAGE,
+  }).catch(() => null);
+
+  // (2) Text the rep. Detached on purpose (see the doc comment).
+  if (inbound.notifyRep && ctx.repNotify.smsOnCallback && ctx.repNotify.phone) {
+    void notifyRepOfInboundCall({
+      repPhone: ctx.repNotify.phone,
+      // From the number they DIALED, so the rep sees a consistent sender and a
+      // reply reaches a number the org actually owns.
+      fromNumber: to,
+      callerName: ctx.leadName,
+      callerPhone: from,
+      orgName: ctx.orgName,
+      forwarded: route.kind === "forward",
+    }).catch(() => {});
+  }
+
+  // (3) Route the caller.
+  const greeting = escapeXml(renderGreeting(inbound.greeting, ctx.orgName));
+  const base = getPublicBaseUrl(req);
+
+  if (route.kind === "reject") {
+    return say("Thanks for calling. Please try us again during business hours.");
+  }
+
+  if (route.kind === "ai") {
+    // The ElevenLabs agent owns an inbound number by taking over its Twilio
+    // webhook, which would mean this route never runs and none of the above
+    // would happen. So "ai" is deliberately NOT a silent no-op that drops the
+    // caller: it answers, files, notifies, and takes a message, and the admin
+    // copy says to point the number at ElevenLabs to have the agent answer.
+    return twiml(
+      `<Say voice="Polly.Joanna">${greeting}</Say>` + voicemailTwiml(inbound, base, callSid),
+    );
+  }
+
+  if (route.kind === "forward") {
+    const action = base
+      ? ` action="${escapeXml(`${base}/api/twilio/voice/inbound-missed?to=${encodeURIComponent(to)}`)}" method="POST"`
+      : "";
+    return twiml(
+      `<Say voice="Polly.Joanna">${greeting}</Say>` +
+        // callerId is OUR number, not the homeowner's: the rep's phone must show
+        // a number they recognise, and forwarding someone else's caller ID is
+        // both confusing and, on many carriers, refused outright.
+        `<Dial timeout="${route.timeoutSec}" callerId="${escapeXml(to)}"${action}>` +
+        `<Number>${escapeXml(route.to)}</Number>` +
+        `</Dial>`,
+    );
+  }
+
+  return twiml(
+    `<Say voice="Polly.Joanna">${greeting}</Say>` + voicemailTwiml(inbound, base, callSid),
+  );
+}
+
+/** Take a message. Shared by the voicemail mode and every fallthrough. */
+function voicemailTwiml(
+  inbound: { recordVoicemail: boolean },
+  base: string | null,
+  callSid: string,
+): string {
+  const prompt =
+    "Please leave your name and number after the tone, and we'll call you right back.";
+  if (!inbound.recordVoicemail) {
+    return `<Say voice="Polly.Joanna">Sorry we missed you. We'll call you right back.</Say><Hangup/>`;
+  }
+  const cb =
+    base && callSid
+      ? ` recordingStatusCallback="${escapeXml(`${base}/api/twilio/status?inbound=1&callSid=${encodeURIComponent(callSid)}`)}"`
+      : "";
+  return (
+    `<Say voice="Polly.Joanna">${prompt}</Say>` +
+    `<Record maxLength="120" playBeep="true" timeout="5"${cb}/>` +
+    `<Say voice="Polly.Joanna">Thanks. We'll be in touch.</Say><Hangup/>`
+  );
+}
+
+/**
  * TwiML endpoint invoked by the Voice SDK / TwiML App when the browser places a
  * call. Modes:
  *
@@ -55,16 +200,29 @@ export async function POST(req: Request) {
   try {
     const form = await req.formData();
     const to = String(form.get("To") ?? "").trim();
+    const from = String(form.get("From") ?? "").trim();
+    const callSid = String(form.get("CallSid") ?? "").trim();
     const conference = String(form.get("Conference") ?? "").trim();
     const monitor = String(form.get("Monitor") ?? "") === "true";
     const monitorToken = String(form.get("Token") ?? "");
     const record = String(form.get("record") ?? "false") === "true";
 
+    const bridge = elevenLabsConfig.bridgeNumber.trim();
+    const kind = classifyIncomingCall({ from, to, conference, monitor, bridgeNumber: bridge });
+
     // ── AI bridge: the ElevenLabs agent dialed our bridge number. Hold the leg
     // briefly; /api/elevenlabs/call moves it into the conference room by REST. ──
-    const bridge = elevenLabsConfig.bridgeNumber.trim();
-    if (bridge && to && digits(to) === digits(bridge)) {
+    if (kind === "ai_bridge") {
       return twiml(`<Pause length="30"/>`);
+    }
+
+    // ── Someone rang one of our dialing numbers BACK ──────────────────────────
+    // Every pool number used to be write-only: this landed in the disabled
+    // direct-dial branch below and the caller was hung up on. Now it is
+    // answered, filed on the Callbacks board, and the rep who owns the lead
+    // gets a text on their personal phone.
+    if (kind === "inbound_callback") {
+      return handleInboundCallback({ from, to, callSid, req });
     }
 
     // ── Supervisor live-listen: join MUTED, silently (no relay needed) ────────

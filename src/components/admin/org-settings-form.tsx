@@ -11,6 +11,7 @@ import {
   Lock,
   Loader2,
   Phone,
+  PhoneIncoming,
   Plus,
   RotateCcw,
   Save,
@@ -19,6 +20,7 @@ import {
 } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
+import { useVocabulary } from "@/components/layout/vocabulary";
 import { SectionCard } from "@/components/shared/section-card";
 import { Button } from "@/components/ui/button";
 import { useConfirm } from "@/components/ui/confirm-dialog";
@@ -145,6 +147,12 @@ export function OrgSettingsForm({
   const [joinCode, setJoinCode] = useState(org.joinCode);
   const [timezone, setTimezone] = useState(org.timezone);
   const [dialing, setDialing] = useState<OrgSettings["dialing"]>(org.settings.dialing);
+  const vocab = useVocabulary();
+  // The inbound node reads through mergeSettings, so an org saved before this
+  // existed still lands on a fully-populated object rather than undefined.
+  const inbound = dialing.inbound;
+  const setInbound = (next: OrgSettings["dialing"]["inbound"]) =>
+    setDialing({ ...dialing, inbound: next });
   const [automation, setAutomation] = useState<OrgSettings["automation"]>(
     org.settings.automation,
   );
@@ -631,6 +639,98 @@ export function OrgSettingsForm({
             </>
           )}
         </div>
+        {/* ── Inbound: what happens when someone rings these numbers BACK ─────
+            Until this existed every pool number was write-only — the dialer
+            rang out from them and anyone returning the call was hung up on. */}
+        <div className="mt-4 rounded-xl border border-border/70 bg-surface/50 p-4">
+          <div className="flex items-center gap-2">
+            <PhoneIncoming className="h-4 w-4 text-muted-foreground" />
+            <h4 className="text-sm font-semibold">Inbound calls</h4>
+          </div>
+          <p className="mt-1 text-xs text-muted-foreground">
+            What a person hears when they call one of the numbers above back. A returned
+            call always lands on the Callbacks tab, whatever this is set to.
+          </p>
+          <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
+            <Field label="When someone calls back">
+              <Select
+                value={inbound.mode}
+                onChange={(e) =>
+                  setInbound({ ...inbound, mode: e.target.value as typeof inbound.mode })
+                }
+              >
+                <option value="off">Don&apos;t answer — numbers stay outbound-only</option>
+                <option value="forward">Ring the rep who owns the lead</option>
+                <option value="voicemail">Answer and take a message</option>
+                <option value="ai">Hand the caller to the AI agent</option>
+              </Select>
+            </Field>
+            {inbound.mode === "forward" && (
+              <NumberField
+                label="Ring for (sec)"
+                hint="5–60. Twilio refuses anything outside that, so it's clamped on save."
+                value={inbound.forwardTimeoutSec ?? 25}
+                onChange={(v) => setInbound({ ...inbound, forwardTimeoutSec: v })}
+              />
+            )}
+          </div>
+
+          {inbound.mode === "ai" && (
+            <p className="mt-2 rounded-lg bg-warning/10 px-3 py-2 text-xs font-medium text-warning">
+              To have the agent actually answer, the number must be assigned to it in
+              ElevenLabs (Conversational AI → Phone Numbers → Inbound). That hands the
+              number&apos;s webhook to ElevenLabs, so this app stops seeing the call — no
+              Callbacks row and no rep text. Until you do that, callers get the greeting
+              and a voicemail box.
+            </p>
+          )}
+
+          {inbound.mode !== "off" && (
+            <div className="mt-3 space-y-3">
+              <Field label="Greeting">
+                <Input
+                  value={inbound.greeting}
+                  placeholder="Thanks for calling {org}. Connecting you now."
+                  onChange={(e) => setInbound({ ...inbound, greeting: e.target.value })}
+                />
+              </Field>
+              <p className="-mt-1.5 text-xs text-muted-foreground">
+                Spoken before anything else. <code>{"{org}"}</code> becomes your
+                organization name. Leave empty for a neutral default.
+              </p>
+              {inbound.mode === "forward" && (
+                <>
+                  <Field label="Fallback number">
+                    <Input
+                      value={inbound.fallbackNumber}
+                      placeholder="+18175550100"
+                      onChange={(e) =>
+                        setInbound({ ...inbound, fallbackNumber: e.target.value })
+                      }
+                    />
+                  </Field>
+                  <p className="-mt-1.5 text-xs text-muted-foreground">
+                    Where calls go when the caller isn&apos;t a known {vocab.leadNoun}, or
+                    the owning rep hasn&apos;t opted in. Empty means take a message.
+                  </p>
+                </>
+              )}
+              <Toggle
+                label="Text the rep who owns the lead"
+                hint="Sends a short SMS to the rep's personal phone the moment a call comes back — name and number only. Each rep adds their own number and opts in under Settings; this switch can't opt them in for them."
+                checked={inbound.notifyRep ?? true}
+                onChange={(v) => setInbound({ ...inbound, notifyRep: v })}
+              />
+              <Toggle
+                label="Record voicemail"
+                hint="Record the message a caller leaves when nobody picks up, so it lands in the call archive with everything else."
+                checked={inbound.recordVoicemail ?? true}
+                onChange={(v) => setInbound({ ...inbound, recordVoicemail: v })}
+              />
+            </div>
+          )}
+        </div>
+
         <div className="mt-3 space-y-3">
           <Toggle
             label="Local presence"

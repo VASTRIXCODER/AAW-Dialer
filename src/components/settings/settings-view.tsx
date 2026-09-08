@@ -4,10 +4,12 @@ import {
   Bell,
   Building2,
   Check,
+  MessageSquare,
   Minus,
   Monitor,
   Moon,
   PhoneCall,
+  PhoneIncoming,
   Radio,
   ShieldCheck,
   Sun,
@@ -19,7 +21,12 @@ import { Avatar } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import { useVocabulary } from "@/components/layout/vocabulary";
 import { Input, Label } from "@/components/ui/input";
+import {
+  DEFAULT_NOTIFY_PREFS,
+  type NotifyPrefs,
+} from "@/lib/dialer/notify-prefs";
 import {
   DEFAULT_DIALER_USER_PREFS,
   type DialerUserPrefs,
@@ -31,7 +38,7 @@ import {
   ROLE_DESCRIPTION,
   ROLE_LABEL,
 } from "@/lib/permissions";
-import { cn } from "@/lib/utils";
+import { cn, formatPhone } from "@/lib/utils";
 
 function Switch({
   checked,
@@ -95,6 +102,7 @@ export function SettingsView({
   permissions = [],
   team: savedTeam = "",
   dialerPrefs = DEFAULT_DIALER_USER_PREFS,
+  notifyPrefs = DEFAULT_NOTIFY_PREFS,
 }: {
   account?: { name: string; email: string } | null;
   role?: OrgRole | null;
@@ -106,8 +114,11 @@ export function SettingsView({
   team?: string;
   /** The saved dialer prefs (profile preferences.dialerPrefs). */
   dialerPrefs?: DialerUserPrefs;
+  /** The saved callback-notification prefs (profile preferences.notify). */
+  notifyPrefs?: NotifyPrefs;
 }) {
   const { theme, setTheme } = useTheme();
+  const vocab = useVocabulary();
   const [mounted, setMounted] = useState(false);
   useEffect(() => setMounted(true), []);
 
@@ -179,6 +190,77 @@ export function SettingsView({
         setPrefs(prev);
         setPrefsStatus("error");
       });
+  };
+
+  // ── Callback notifications ────────────────────────────────────────────────
+  // The number is saved EXPLICITLY (a button, not on every keystroke) because
+  // a half-typed phone number is a number that can't be reached, and the
+  // toggles depend on it. The toggles then save immediately, like the ones
+  // above.
+  const [notifyPrefsState, setNotifyPrefsState] = useState<NotifyPrefs>(notifyPrefs);
+  const [notifyPhone, setNotifyPhone] = useState(
+    notifyPrefs.phone ? formatPhone(notifyPrefs.phone) : "",
+  );
+  const [savedNotify, setSavedNotify] = useState({
+    phoneInput: notifyPrefs.phone ? formatPhone(notifyPrefs.phone) : "",
+  });
+  const [notifySaving, setNotifySaving] = useState(false);
+  const [notifyStatus, setNotifyStatus] = useState<"idle" | "saved" | "error">("idle");
+  const [notifyError, setNotifyError] = useState("");
+  const notifySeq = useRef(0);
+
+  async function persistNotify(next: NotifyPrefs, phoneInput: string) {
+    const seq = ++notifySeq.current;
+    const res = await fetch("/api/profile", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ preferences: { notify: next } }),
+    }).catch(() => null);
+    if (seq !== notifySeq.current) return null;
+    const json = (await res?.json().catch(() => ({}))) as { error?: string };
+    if (!res?.ok) {
+      setNotifyError(json.error ?? "");
+      setNotifyStatus("error");
+      return null;
+    }
+    setSavedNotify({ phoneInput });
+    setNotifyError("");
+    setNotifyStatus("saved");
+    return next;
+  }
+
+  async function saveNotify() {
+    setNotifySaving(true);
+    setNotifyStatus("idle");
+    try {
+      // Clearing the number turns both consents off with it — the server does
+      // the same, but doing it here too keeps the switches honest immediately
+      // instead of showing "on" against an empty field until the next load.
+      const cleared = notifyPhone.replace(/\D/g, "").length === 0;
+      const next: NotifyPrefs = cleared
+        ? { phone: "", smsOnCallback: false, forwardCallback: false }
+        : { ...notifyPrefsState, phone: notifyPhone };
+      const ok = await persistNotify(next, notifyPhone);
+      if (ok) setNotifyPrefsState({ ...next, phone: cleared ? "" : notifyPhone });
+    } finally {
+      setNotifySaving(false);
+    }
+  }
+
+  const setNotify = (k: "smsOnCallback" | "forwardCallback") => (v: boolean) => {
+    // A consent with no number behind it is a promise nothing can keep.
+    if (!notifyPrefsState.phone && v) {
+      setNotifyError("Add and save your number first.");
+      setNotifyStatus("error");
+      return;
+    }
+    const prev = notifyPrefsState;
+    const next = { ...notifyPrefsState, [k]: v };
+    setNotifyPrefsState(next);
+    setNotifyStatus("idle");
+    void persistNotify(next, savedNotify.phoneInput).then((ok) => {
+      if (!ok) setNotifyPrefsState(prev); // the switch must not lie
+    });
   };
 
   const themes = [
@@ -364,6 +446,80 @@ export function SettingsView({
           <p className="mt-3 border-t border-border pt-3 text-xs text-muted-foreground">
             Call recording follows your organization’s policy (Admin → Dialing) and
             appointment emails are configured in Admin → Notifications.
+          </p>
+        </Card>
+
+        {/* Callback notifications — the rep's own phone number, so a homeowner
+            who rings one of the dialing numbers back reaches a human. Two
+            SEPARATE consents on purpose: wanting a heads-up is not the same as
+            agreeing to have your personal mobile ring. */}
+        <Card className="p-6">
+          <div className="flex items-center justify-between">
+            <h3 className="font-semibold">When someone calls you back</h3>
+            {notifyStatus === "saved" && (
+              <span className="text-xs font-medium text-success">Saved ✓</span>
+            )}
+            {notifyStatus === "error" && (
+              <span className="text-xs font-medium text-danger" role="status">
+                {notifyError || "Couldn’t save — check your connection and try again."}
+              </span>
+            )}
+          </div>
+          <p className="text-sm text-muted-foreground">
+            Your personal number. Used only to reach you about returned calls — never
+            shown to a {vocab.leadNoun} and never dialed from.
+          </p>
+
+          <label className="mt-4 block">
+            <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+              Your mobile number
+            </span>
+            <div className="mt-1.5 flex gap-2">
+              <Input
+                value={notifyPhone}
+                onChange={(e) => {
+                  setNotifyPhone(e.target.value);
+                  setNotifyStatus("idle");
+                }}
+                placeholder="(817) 555-0199"
+                inputMode="tel"
+                autoComplete="tel"
+                className="flex-1"
+              />
+              <Button
+                variant="outline"
+                onClick={saveNotify}
+                disabled={notifySaving || notifyPhone === savedNotify.phoneInput}
+              >
+                {notifySaving ? "Saving…" : "Save"}
+              </Button>
+            </div>
+          </label>
+
+          <div className="mt-2 divide-y divide-border">
+            <PrefRow
+              icon={MessageSquare}
+              title="Text me when someone calls back"
+              desc={
+                notifyPrefsState.phone
+                  ? `We’ll text ${formatPhone(notifyPrefsState.phone)} the moment a ${vocab.leadNoun} rings one of your numbers back`
+                  : "Add your number above to turn this on"
+              }
+              checked={notifyPrefsState.smsOnCallback}
+              onChange={setNotify("smsOnCallback")}
+            />
+            <PrefRow
+              icon={PhoneIncoming}
+              title="Ring my phone"
+              desc="Put the caller straight through to your mobile, so you can answer wherever you are"
+              checked={notifyPrefsState.forwardCallback}
+              onChange={setNotify("forwardCallback")}
+            />
+          </div>
+          <p className="mt-3 border-t border-border pt-3 text-xs text-muted-foreground">
+            Returned calls always land on the Callbacks tab, whether or not these are on.
+            Your organization decides what a returning caller hears (Admin → Dialing →
+            Inbound calls).
           </p>
         </Card>
       </div>
