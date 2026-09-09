@@ -2,6 +2,7 @@
 
 import { motion } from "framer-motion";
 import {
+  AlertCircle,
   Bot,
   ChevronDown,
   ExternalLink,
@@ -291,6 +292,22 @@ export function AiSessionView({
         </div>
       )}
 
+      {/* The engine's own halt reason.
+          This was the gap: when the provider refuses to dial (out of credits,
+          breaker open) the engine sets state.error with a plain-English reason
+          AND stops the pump — but this view only ever rendered the listen and
+          intervene errors, so the rep saw dialing silently stop with no
+          explanation. The idle screen shows state.error; the AI session, the
+          one screen you are actually watching when it happens, did not. */}
+      {state.error && (
+        <div className="flex items-start gap-2 rounded-xl border border-danger/30 bg-danger/10 px-3 py-2.5">
+          <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-danger" />
+          <div className="min-w-0">
+            <p className="text-xs font-semibold text-danger">AI dialing stopped</p>
+            <p className="mt-0.5 text-xs text-muted-foreground">{state.error}</p>
+          </div>
+        </div>
+      )}
       {interveneError && (
         <p className="rounded-lg bg-danger/10 px-3 py-2 text-xs font-medium text-danger">
           {interveneError}
