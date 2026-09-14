@@ -15,7 +15,6 @@ import {
 } from "lucide-react";
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { prefetchBriefing } from "@/components/ai/lead-briefing";
 import { useVocabulary } from "@/components/layout/vocabulary";
 import { Badge } from "@/components/ui/badge";
 import { Card } from "@/components/ui/card";
@@ -119,10 +118,6 @@ export function DialerClient({
   const showFloor = layout?.floor !== false;
   const showBookedTab = layout?.bookedTab !== false;
   const showScriptCard = layout?.scriptCard !== false;
-  // Undefined = the layout never resolved a list, so QualifyPanel falls back to
-  // its own core defaults and DOES render fields. Only an explicit empty list
-  // means the panel is briefing-and-notes only.
-  const hasQualifyFields = config.qualifyFields?.length !== 0;
 
   // ── Booked tab ────────────────────────────────────────────────────────────
   // Leads with an appointment already on the calendar. getDialQueue already
@@ -315,16 +310,6 @@ export function DialerClient({
         (_, i) => queueForDialer[(state.queueIndex + i + 1) % queueForDialer.length],
       )
     : [];
-
-  // Warm the NEXT lead's AI briefing while the rep is still on this call, so it
-  // is on screen the moment the queue advances instead of after a multi-second
-  // model call. Deliberately gated on an active call: browsing the queue while
-  // idle must not fire a briefing for every lead the rep scrolls past.
-  const nextLeadId = upNext[0]?.id ?? null;
-  useEffect(() => {
-    if (state.status === "idle") return;
-    prefetchBriefing(nextLeadId);
-  }, [nextLeadId, state.status]);
 
   // ── Campaign script (A/B test) ─────────────────────────────────────────────
   // Which script the focus lead's campaign assigns them. Deterministic per lead
@@ -941,20 +926,10 @@ export function DialerClient({
         <Card className="overflow-hidden lg:col-span-4" data-dialer-teleprompter="">
           <div className="border-b border-border px-5 py-3">
             <h3 className="font-semibold">
-              {/* Two things vary here. An org can switch every qualify field off
-                  (Admin → field schema), leaving the briefing and notes — calling
-                  that a "workflow" would describe a panel that isn't on screen.
-                  And the header used to read "Solar resolution workflow" for the
-                  solar vertical and promise "the account review" to everyone
-                  else, so a recruiter's dialer told them to capture a homeowner's
-                  utility review. Both now follow what's actually on screen and
-                  the words this workspace uses. */}
-              {hasQualifyFields ? "Qualification workflow" : `${vocab.LeadNoun} briefing`}
+              Lead information
             </h3>
             <p className="text-xs text-muted-foreground">
-              {hasQualifyFields
-                ? `Qualify the ${vocab.leadNoun} & book the ${vocab.appointmentNoun}`
-                : "Context for this call & your notes"}
+              Everything from the lead sheet, plus your call notes.
             </p>
           </div>
           {/* Teleprompter replaces the static script card whenever a campaign
@@ -976,7 +951,7 @@ export function DialerClient({
               key={focusLead?.id ?? "none"}
               lead={focusLead}
               fields={config.qualifyFields}
-              showAiBriefing={layout?.aiBriefing !== false}
+              leadFields={config.leadFields}
               notes={notes}
               onNotesChange={(n) => updateNotes(n, focusLead?.id ?? null)}
             />

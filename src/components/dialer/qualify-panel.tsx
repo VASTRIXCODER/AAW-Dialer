@@ -1,9 +1,8 @@
 "use client";
 
 import { motion } from "framer-motion";
-import { BatteryCharging, Car, CircleEllipsis, Waves } from "lucide-react";
+import { BatteryCharging, Car, CircleEllipsis, FileText, Waves } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { AiBriefing } from "@/components/ai/lead-briefing";
 import { CountUp } from "@/components/motion";
 import { Input, Label, Textarea } from "@/components/ui/input";
 import {
@@ -12,6 +11,7 @@ import {
   parseFieldValue,
   type LeadFieldDef,
 } from "@/lib/leads/field-schema";
+import { leadSheetSections } from "@/lib/leads/lead-sheet";
 import type { Lead } from "@/lib/types";
 import { cn, formatCurrency } from "@/lib/utils";
 
@@ -89,12 +89,85 @@ function toInputString(
 
 const DEFAULT_QUALIFY_FIELDS = CORE_LEAD_FIELDS.filter((f) => f.showInQualify);
 
+function LeadSheetDetails({
+  lead,
+  fields,
+  notes,
+  onNotesChange,
+}: {
+  lead: Lead | null;
+  fields?: LeadFieldDef[];
+  notes: string;
+  onNotesChange: (notes: string) => void;
+}) {
+  if (!lead) {
+    return (
+      <div className="rounded-xl border border-border/60 bg-muted/30 p-3">
+        <div className="flex items-center gap-2 text-primary">
+          <FileText className="h-4 w-4" />
+          <span className="text-sm font-semibold">Lead sheet</span>
+        </div>
+        <p className="mt-1.5 text-xs text-muted-foreground">
+          Select a lead to see the information imported with it.
+        </p>
+      </div>
+    );
+  }
+
+  const sections = leadSheetSections(lead, fields);
+
+  return (
+    <section className="space-y-4" aria-labelledby="lead-sheet-heading">
+      <div className="flex items-start gap-2">
+        <span className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-primary-soft text-primary">
+          <FileText className="h-3.5 w-3.5" aria-hidden />
+        </span>
+        <div>
+          <h4 id="lead-sheet-heading" className="text-sm font-semibold">
+            Lead sheet
+          </h4>
+          <p className="text-xs text-muted-foreground">
+            All information imported for this lead.
+          </p>
+        </div>
+      </div>
+
+      {sections.map((section) => (
+        <div key={section.key}>
+          <p className="mb-2 text-[11px] font-bold uppercase tracking-wide text-muted-foreground">
+            {section.label}
+          </p>
+          <dl className="grid grid-cols-2 gap-x-4 gap-y-2.5">
+            {section.entries.map((entry) => (
+              <div key={entry.key} className="min-w-0">
+                <dt className="text-[11px] font-medium text-muted-foreground">{entry.label}</dt>
+                <dd className="break-words text-sm leading-snug">{entry.value}</dd>
+              </div>
+            ))}
+          </dl>
+        </div>
+      ))}
+
+      <div>
+        <p className="mb-2.5 text-xs font-bold uppercase tracking-wide text-muted-foreground">
+          Notes
+        </p>
+        <Textarea
+          placeholder="Lifestyle changes, objections, follow-ups…"
+          value={notes}
+          onChange={(e) => onNotesChange(e.target.value)}
+        />
+      </div>
+    </section>
+  );
+}
+
 export function QualifyPanel({
   lead,
   notes: controlledNotes,
   onNotesChange,
   fields,
-  showAiBriefing = true,
+  leadFields,
 }: {
   lead: Lead | null;
   /**
@@ -107,8 +180,8 @@ export function QualifyPanel({
   onNotesChange?: (notes: string) => void;
   /** The fields to render, in order — the org's resolved qualify schema. */
   fields?: LeadFieldDef[];
-  /** Layout toggle for the AI briefing block. */
-  showAiBriefing?: boolean;
+  /** Full resolved schema — gives the lead-sheet view every imported CSV column. */
+  leadFields?: LeadFieldDef[];
 }) {
   const defs = fields ?? DEFAULT_QUALIFY_FIELDS;
   const inputs = defs.filter((f) => f.type !== "boolean");
@@ -225,7 +298,15 @@ export function QualifyPanel({
 
   return (
     <div className="space-y-5">
-      {showAiBriefing && <AiBriefing leadId={lead?.id ?? null} />}
+      <LeadSheetDetails
+        lead={lead}
+        fields={leadFields}
+        notes={notes}
+        onNotesChange={(next) => {
+          setOwnNotes(next);
+          onNotesChange?.(next);
+        }}
+      />
 
       {inputs.length > 0 && (
         <div>
@@ -288,19 +369,6 @@ export function QualifyPanel({
         </div>
       )}
 
-      <div>
-        <p className="mb-2.5 text-xs font-bold uppercase tracking-wide text-muted-foreground">
-          Notes
-        </p>
-        <Textarea
-          placeholder="Lifestyle changes, objections, follow-ups…"
-          value={notes}
-          onChange={(e) => {
-            setOwnNotes(e.target.value);
-            onNotesChange?.(e.target.value);
-          }}
-        />
-      </div>
     </div>
   );
 }
