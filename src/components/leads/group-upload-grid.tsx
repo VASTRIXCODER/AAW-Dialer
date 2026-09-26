@@ -270,6 +270,7 @@ export function GroupUploadGrid({
   groups,
   miscCount,
   missingCountyCount,
+  missingTimezoneCount,
 }: {
   canImport: boolean;
   groups: LeadGroupWithCount[];
@@ -277,13 +278,15 @@ export function GroupUploadGrid({
   /** Leads with a ZIP but no county yet — passed straight through to the
    *  "Backfill counties" control in Edit groups (see LeadGroupManager). */
   missingCountyCount: number;
+  /** Leads with a state but no timezone yet — the "Backfill time zones" twin. */
+  missingTimezoneCount: number;
 }) {
   const [open, setOpen] = useState(false);
   const [managing, setManaging] = useState(false);
   const [preview, setPreview] = useState<{ data: SortPreviewResponse; file: string } | null>(null);
   const [sortLimit, setSortLimit] = useState(2000);
   const [packSize, setPackSize] = useState(0);
-  const [packBy, setPackBy] = useState<"sequence" | "city">("sequence");
+  const [packBy, setPackBy] = useState<"sequence" | "city" | "timezone">("sequence");
 
   if (!canImport) return null;
 
@@ -347,13 +350,14 @@ export function GroupUploadGrid({
                   Group packs by
                 </p>
                 <p className="mb-2 text-xs text-muted-foreground">
-                  Either way, rows keep the order of your file.
+                  File order and city keep your file's order; time zone runs east to west.
                 </p>
                 <div className="flex flex-wrap gap-1.5">
                   {(
                     [
                       { v: "sequence", label: "File order" },
                       { v: "city", label: "City" },
+                      { v: "timezone", label: "Time zone" },
                     ] as const
                   ).map((o) => (
                     <button
@@ -363,7 +367,9 @@ export function GroupUploadGrid({
                       title={
                         o.v === "city"
                           ? "Each city gets its own pack, in the order your file introduces them"
-                          : "Straight slices down the file, in order"
+                          : o.v === "timezone"
+                            ? "Each time zone gets its own pack, from each lead's state and ZIP — Eastern first, Pacific last"
+                            : "Straight slices down the file, in order"
                       }
                       className={cn(
                         "rounded-lg px-2.5 py-1 text-xs font-semibold transition-colors",
@@ -394,6 +400,7 @@ export function GroupUploadGrid({
                 initialGroups={groups}
                 initialMiscCount={miscCount}
                 initialMissingCountyCount={missingCountyCount}
+                initialMissingTimezoneCount={missingTimezoneCount}
               />
             </div>
           ) : (

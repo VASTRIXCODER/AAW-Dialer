@@ -70,8 +70,10 @@ export function SortPreviewReview({
   packSize?: number;
   packBatch?: string;
   /** "sequence" slices each bucket in order; "city" gives each city its own
-   *  pack(s) within the bucket, cities in first-appearance order. */
-  packBy?: "sequence" | "city";
+   *  pack(s) within the bucket, cities in first-appearance order; "timezone"
+   *  gives each timezone (inferred from state+zip) its own pack(s), east to
+   *  west. */
+  packBy?: "sequence" | "city" | "timezone";
   onDone: () => void;
   onCancel: () => void;
 }) {

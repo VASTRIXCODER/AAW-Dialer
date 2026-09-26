@@ -26,6 +26,7 @@ import {
   createPacks,
   planCityPacks,
   planPacks,
+  planTimezonePacks,
   pruneEmptyPacks,
   setPackSizes,
 } from "@/lib/db/lead-packs";
@@ -146,8 +147,9 @@ export async function POST(req: Request) {
     packBatch?: string | null;
     /** How to cut the packs. "sequence" (default) slices the file in order;
      *  "city" gives each city its own pack(s), in the order the file presents
-     *  them. Either way rows keep their file order — see planCityPacks. */
-    packBy?: "sequence" | "city" | null;
+     *  them; "timezone" gives each timezone (from state+zip) its own pack(s),
+     *  in canonical east-to-west order. See planCityPacks / planTimezonePacks. */
+    packBy?: "sequence" | "city" | "timezone" | null;
     // ── Chunked upload (one file arriving as several requests) ──────────────
     /** This chunk's first data row index within the whole file. Keeps created_at
      *  — and therefore the dial queue — in file order across chunks. */
@@ -306,7 +308,8 @@ export async function POST(req: Request) {
   // rows mean the final counts aren't knowable until the write lands.
   const packSize = Number(body.packSize) || 0;
   const wantsPacks = packSize > 0 && Boolean(viewer.org?.id);
-  const packBy = body.packBy === "city" ? "city" : "sequence";
+  const packBy =
+    body.packBy === "city" ? "city" : body.packBy === "timezone" ? "timezone" : "sequence";
   // Packs this upload already created in earlier chunks — numbering continues
   // from there so one file never deals out two "Pack 1"s.
   const packSeqOffset = Math.max(0, Math.floor(Number(body.packSeqOffset) || 0));
@@ -315,21 +318,30 @@ export async function POST(req: Request) {
 
   if (wantsPacks && viewer.org?.id) {
     const batch = (body.packBatch || "Upload").toString();
-    if (packBy === "city") {
-      // One pack per city (or several for a big city), cities in the order the
-      // file introduced them. planCityPacks owns that ordering; this only maps
-      // its planned row indices onto the pack ids the insert hands back.
-      const planned = planCityPacks(
-        capped as { city?: string | null; state?: string | null }[],
-        packSize,
-        batch,
-      );
+    if (packBy === "city" || packBy === "timezone") {
+      // One pack per city or per timezone (or several for a big one). Cities
+      // come out in file-introduction order; timezones come out canonical
+      // east-to-west — either way, planCityPacks/planTimezonePacks own the
+      // ordering, and this only maps their planned row indices onto the pack
+      // ids the insert hands back.
+      const planned =
+        packBy === "city"
+          ? planCityPacks(
+              capped as { city?: string | null; state?: string | null }[],
+              packSize,
+              batch,
+            )
+          : planTimezonePacks(
+              capped as { state?: string | null; zip?: string | null }[],
+              packSize,
+              batch,
+            );
       const packs = await createPacks(viewer.org.id, {
         batch,
         packCount: planned.length,
         createdBy: viewer.user?.id ?? null,
-        // A city that spans two chunks gets a pack in each. Both would otherwise
-        // read "Jan list · Fresno, CA" with nothing to tell them apart, so a
+        // A group that spans two chunks gets a pack in each. Both would
+        // otherwise read identically with nothing to tell them apart, so a
         // continuation chunk numbers its packs explicitly.
         labels: planned.map((p, i) =>
           packSeqOffset > 0 ? `${p.label} · Pack ${packSeqOffset + i + 1}` : p.label,

@@ -3,6 +3,7 @@
 import {
   AlertTriangle,
   Check,
+  Clock,
   Inbox,
   Loader2,
   MapPin,
@@ -36,12 +37,16 @@ export function LeadGroupManager({
   initialGroups,
   initialMiscCount,
   initialMissingCountyCount,
+  initialMissingTimezoneCount,
 }: {
   initialGroups: LeadGroupWithCount[];
   initialMiscCount: number;
   /** Leads with a ZIP but no county yet (see getMissingCountyCount) — drives
    *  the "Backfill counties" control below. */
   initialMissingCountyCount: number;
+  /** Leads with a state but no timezone yet (see getMissingTimezoneCount) —
+   *  drives the "Backfill time zones" control below. */
+  initialMissingTimezoneCount: number;
 }) {
   const router = useRouter();
   const [groups, setGroups] = useState<LeadGroupWithCount[]>(initialGroups);
@@ -65,6 +70,18 @@ export function LeadGroupManager({
   const [missingCountyCount, setMissingCountyCount] = useState(initialMissingCountyCount);
   const [backfilling, setBackfilling] = useState(false);
   const [backfillMsg, setBackfillMsg] = useState<string | null>(null);
+
+  // "Backfill time zones" — the exact same shape, one column over (see
+  // src/lib/leads/address-timezone.ts). A separate button rather than folding
+  // into "Backfill counties": a lead can resolve a county without resolving a
+  // timezone (no ZIP match) or vice versa (a state alone is enough for
+  // timezone), so one button silently skipping half its own name would be
+  // more confusing than two small, honest ones.
+  const [missingTimezoneCount, setMissingTimezoneCount] = useState(
+    initialMissingTimezoneCount,
+  );
+  const [backfillingTz, setBackfillingTz] = useState(false);
+  const [backfillTzMsg, setBackfillTzMsg] = useState<string | null>(null);
 
   async function create() {
     if (!newLabel.trim()) return;
@@ -194,6 +211,38 @@ export function LeadGroupManager({
       setBackfillMsg("Couldn't reach the server.");
     } finally {
       setBackfilling(false);
+    }
+  }
+
+  async function backfillTimezone() {
+    setBackfillingTz(true);
+    setBackfillTzMsg(null);
+    try {
+      const res = await fetch("/api/leads/backfill-timezone", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ limit: 10000 }),
+      });
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok || json.error) {
+        setBackfillTzMsg(json.error ?? "Couldn't backfill time zones.");
+        return;
+      }
+      setMissingTimezoneCount(json.remaining ?? 0);
+      setBackfillTzMsg(
+        json.checked === 0
+          ? "Every lead with a state already has a time zone."
+          : `Filed ${json.updated} of ${json.checked}${
+              json.unmatched
+                ? ` (${json.unmatched} state${json.unmatched === 1 ? "" : "s"} not recognized)`
+                : ""
+            } — ${json.remaining} left.`,
+      );
+      router.refresh();
+    } catch {
+      setBackfillTzMsg("Couldn't reach the server.");
+    } finally {
+      setBackfillingTz(false);
     }
   }
 
@@ -351,6 +400,40 @@ export function LeadGroupManager({
           </button>
         </div>
         {backfillMsg && <p className="mt-2 text-xs text-muted-foreground">{backfillMsg}</p>}
+      </div>
+
+      {/* Time zone is also a plain fact, computed from state+zip at import
+          time — same "only matters once per org" shape as county above. This
+          is the field timezone-based lead-pack sorting groups leads by. */}
+      <div className="rounded-xl border border-border/70 bg-muted/20 p-3">
+        <div className="flex flex-wrap items-center gap-2">
+          <Clock className="h-4 w-4 shrink-0 text-muted-foreground" />
+          <span className="text-sm font-semibold">Time zones</span>
+          {missingTimezoneCount > 0 && (
+            <Badge tone="warning">{missingTimezoneCount.toLocaleString()}</Badge>
+          )}
+          <span className="text-xs text-muted-foreground">
+            {missingTimezoneCount > 0
+              ? "Leads with a state but no time zone on file yet"
+              : "Every lead with a state has a time zone on file"}
+          </span>
+          <button
+            type="button"
+            onClick={() => void backfillTimezone()}
+            disabled={backfillingTz || missingTimezoneCount === 0}
+            className="ml-auto flex items-center gap-1 rounded-lg border border-border bg-background/60 px-2 py-1 text-[11px] font-semibold transition-colors hover:bg-muted disabled:opacity-50"
+          >
+            {backfillingTz ? (
+              <Loader2 className="h-3 w-3 animate-spin" />
+            ) : (
+              <Clock className="h-3 w-3" />
+            )}
+            Backfill time zones
+          </button>
+        </div>
+        {backfillTzMsg && (
+          <p className="mt-2 text-xs text-muted-foreground">{backfillTzMsg}</p>
+        )}
       </div>
 
       <div className="rounded-xl border border-dashed border-border p-3">

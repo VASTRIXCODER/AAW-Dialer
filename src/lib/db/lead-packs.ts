@@ -1,5 +1,6 @@
 import "server-only";
 
+import { timezoneForAddress, TIMEZONE_ORDER, zoneLabel } from "../leads/address-timezone";
 import { createAdminClient, isAdminConfigured } from "../supabase/admin";
 import { createClient } from "../supabase/server";
 
@@ -134,6 +135,77 @@ export function planCityPacks(
     const kept = packs.slice(0, MAX_PACKS_PER_UPLOAD - 1);
     const rest = packs.slice(MAX_PACKS_PER_UPLOAD - 1).flatMap((p) => p.indices);
     kept.push({ label: `${batch} · Remaining cities`, indices: rest });
+    return kept;
+  }
+  return packs;
+}
+
+/**
+ * Cut rows into packs GROUPED BY TIME ZONE, computed from each row's address
+ * (state + ZIP — see lib/leads/address-timezone.ts), not its phone number.
+ *
+ * Unlike planCityPacks, order here is NOT first-appearance — it's canonical
+ * east-to-west (TIMEZONE_ORDER). A file's own ordering carries no operational
+ * meaning for timezone the way it does for "which city did the list start
+ * with," but zone order carries a real one: a manager handing out packs at
+ * 8am wants "Eastern" handed out first, because it's already the workday
+ * there while Pacific is still asleep. First-appearance would scramble that
+ * every time the source file happened to lead with a Texas lead.
+ *
+ * Rows whose address doesn't resolve to a zone (no state, or a state/territory
+ * this table doesn't cover) collect in one trailing "Unknown time zone" bucket
+ * rather than being silently dropped or guessed into the wrong region —
+ * matching planCityPacks' own "No city" bucket for the same class of gap.
+ */
+export function planTimezonePacks(
+  rows: { state?: string | null; zip?: string | null }[],
+  packSize: number,
+  batch: string,
+): PlannedPack[] {
+  const size = Math.max(MIN_PACK_SIZE, Math.floor(packSize) || MIN_PACK_SIZE);
+  const UNKNOWN = "__unknown__";
+  const byZone = new Map<string, number[]>();
+
+  rows.forEach((r, i) => {
+    const tz = timezoneForAddress({ state: r.state, zip: r.zip }) ?? UNKNOWN;
+    if (!byZone.has(tz)) byZone.set(tz, []);
+    byZone.get(tz)!.push(i);
+  });
+
+  // Canonical order first (only the zones actually present), then any zone
+  // this rare edge case produced that TIMEZONE_ORDER doesn't list (there
+  // shouldn't be one — a test enforces it — but a pack plan degrading to "at
+  // the end" is a far better failure than an exception mid-import), then
+  // Unknown last, always.
+  const order = [
+    ...TIMEZONE_ORDER.filter((tz) => byZone.has(tz)),
+    ...[...byZone.keys()].filter((tz) => tz !== UNKNOWN && !TIMEZONE_ORDER.includes(tz)),
+    ...(byZone.has(UNKNOWN) ? [UNKNOWN] : []),
+  ];
+
+  const packs: PlannedPack[] = [];
+  for (const tz of order) {
+    const idx = byZone.get(tz) ?? [];
+    const label = tz === UNKNOWN ? "Unknown time zone" : zoneLabel(tz);
+    // A zone small enough for one pack is named plainly, same as a single-pack
+    // city — "· Pack 1" with no Pack 2 anywhere reads like something's missing.
+    const count = Math.max(1, Math.ceil(idx.length / size));
+    for (let p = 0; p < count; p++) {
+      packs.push({
+        label: count === 1 ? `${batch} · ${label}` : `${batch} · ${label} · Pack ${p + 1}`,
+        indices: idx.slice(p * size, (p + 1) * size),
+      });
+    }
+  }
+
+  // At most ~10 zones exist, so this ceiling is essentially unreachable in
+  // practice — kept only so a timezone pack plan degrades exactly the same
+  // way a city one does, rather than being the one pack planner that can
+  // silently exceed it.
+  if (packs.length > MAX_PACKS_PER_UPLOAD) {
+    const kept = packs.slice(0, MAX_PACKS_PER_UPLOAD - 1);
+    const rest = packs.slice(MAX_PACKS_PER_UPLOAD - 1).flatMap((p) => p.indices);
+    kept.push({ label: `${batch} · Remaining`, indices: rest });
     return kept;
   }
   return packs;

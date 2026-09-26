@@ -1,5 +1,6 @@
 import "server-only";
 
+import { timezoneForAddress } from "../leads/address-timezone";
 import { leads as fallbackLeads, getLeadById as fallbackById } from "../data";
 import { DIALABLE_STATUSES } from "../leads/dialable";
 import {
@@ -106,7 +107,16 @@ export function rowToLead(r: Row): Lead {
     multipleSystems: Boolean(r.multiple_systems),
     notes: (r.notes as string) ?? undefined,
     aiScore: r.ai_score == null ? undefined : Number(r.ai_score),
-    timezone: (r.timezone as string) ?? "America/Los_Angeles",
+    // NOT "America/Los_Angeles" — that was the exact bug a 2026-08-30 migration
+    // (see supabase/schema.sql) removed the column's bogus DEFAULT to fix: every
+    // lead without a real stored zone read as Pacific, which is wrong in the
+    // direction that makes an out-of-hours call look fine. resolveLeadTimezone
+    // (lib/dialer/lead-timezone.ts) treats an empty string as "no stored zone"
+    // and falls through to the phone-area-code inference — but only if this
+    // mapper actually HANDS it an empty string instead of re-inventing the same
+    // fake default one layer up in JS. "" satisfies Lead.timezone's `string`
+    // type without lying the way a fallback IANA zone would.
+    timezone: (r.timezone as string) ?? "",
     lastContactedAt: (r.last_contacted_at as string) ?? undefined,
     createdAt: (r.created_at as string) ?? new Date().toISOString(),
     ownerId: (r.owner_id as string) ?? undefined,
@@ -1757,6 +1767,35 @@ export async function getMissingCountyCount(orgId: string | null): Promise<numbe
 }
 
 /**
+ * How many of the org's leads have a state on file but no timezone yet — the
+ * "Backfill time zones" counterpart to getMissingCountyCount above. Matches
+ * POST /api/leads/backfill-timezone's read scope exactly (`timezone is null`,
+ * `state` present and non-blank, this org).
+ *
+ * `state` rather than `zip` is the gate, unlike county: timezoneForAddress's
+ * primary signal is the state (a ZIP is only consulted for the two override
+ * regions), so a lead with a state but no ZIP is still fully backfillable —
+ * gating on ZIP the way county does would under-count what this button can
+ * actually fix.
+ */
+export async function getMissingTimezoneCount(orgId: string | null): Promise<number> {
+  if (!orgId || !isSupabaseConfigured()) return 0;
+  try {
+    const supabase = await createClient();
+    const { count } = await supabase
+      .from("leads")
+      .select("id", { count: "exact", head: true })
+      .eq("org_id", orgId)
+      .is("timezone", null)
+      .not("state", "is", null)
+      .neq("state", "");
+    return count ?? 0;
+  } catch {
+    return 0;
+  }
+}
+
+/**
  * Head-count of the viewer's dial queue (same scope + status filter as
  * getDialQueue) for the dialer's header badge, so the page stops serializing
  * the entire queue into the RSC payload just to render a number. Slightly
@@ -1821,6 +1860,11 @@ export interface LeadInput {
    *  (see countyForZip in lib/leads/zip-county.ts); explicit `null` skips that
    *  and stores no county even if the ZIP would otherwise resolve one. */
   county?: string | null;
+  /** Explicit timezone override (a real IANA zone, e.g. "America/Denver").
+   *  Omitted = computed from `state` + `zip` at insert time (see
+   *  timezoneForAddress in lib/leads/address-timezone.ts); explicit `null`
+   *  skips that and stores no zone even if the address would resolve one. */
+  timezone?: string | null;
   notes?: string;
   /** Typed spillover for CSV columns beyond the core slots (custom_fields jsonb). */
   customFields?: Record<string, string | number | boolean>;
@@ -1908,6 +1952,17 @@ export async function insertLeads(
             // that already knows the county (none do yet) can pass it directly.
             county:
               r.county !== undefined ? r.county : (countyForZip(r.zip)?.county ?? null),
+            // Same contract as county, one line up: computed from the address
+            // (state + zip) unless the caller already supplied one. This is
+            // what timezone-based lead-pack sorting groups leads by, and what
+            // resolveLeadTimezone now prefers over the phone's area code for
+            // TCPA calling-window enforcement — the address is the more
+            // trustworthy signal for where a lead actually is, since phone
+            // numbers are portable and addresses (mostly) aren't.
+            timezone:
+              r.timezone !== undefined
+                ? r.timezone
+                : (timezoneForAddress({ state: r.state, zip: r.zip }) ?? null),
             notes: r.notes || null,
             custom_fields: r.customFields ?? {},
           },

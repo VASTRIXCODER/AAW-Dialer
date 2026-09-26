@@ -15,6 +15,7 @@ import { PageContainer, PageHeader } from "@/components/shared/page-header";
 import {
   getLeadsPage,
   getMissingCountyCount,
+  getMissingTimezoneCount,
   LEADS_PAGE_SIZE,
   listPlaces,
   type LeadsSort,
@@ -171,12 +172,15 @@ export default async function LeadsPage({
   }
   // The org's own intake groups (+ how many leads sit in each, and in the
   // Miscellaneous catch-all) drive both the upload tiles and the group filter.
-  // missingCountyCount rides alongside it — both are org-scoped HEAD counts
-  // that only Edit groups needs, gated behind the same canManage check.
-  const [{ groups: leadGroups, miscCount }, missingCountyCount] = await Promise.all([
-    listLeadGroupsWithCounts(viewer.org?.id ?? null),
-    getMissingCountyCount(viewer.org?.id ?? null),
-  ]);
+  // missingCountyCount/missingTimezoneCount ride alongside it — all three are
+  // org-scoped HEAD counts that only Edit groups needs, gated behind the same
+  // canManage check.
+  const [{ groups: leadGroups, miscCount }, missingCountyCount, missingTimezoneCount] =
+    await Promise.all([
+      listLeadGroupsWithCounts(viewer.org?.id ?? null),
+      getMissingCountyCount(viewer.org?.id ?? null),
+      getMissingTimezoneCount(viewer.org?.id ?? null),
+    ]);
   // Lead management (delete / reassign) is for managers+ (leads.import). Pull the
   // org's members so a supervisor can reassign leads between accounts.
   const canManage = viewer.permissions.includes("leads.import");
@@ -291,6 +295,7 @@ export default async function LeadsPage({
           groups={leadGroups}
           miscCount={miscCount}
           missingCountyCount={missingCountyCount}
+          missingTimezoneCount={missingTimezoneCount}
         />
         <EmptyState
           icon={Users}
@@ -313,6 +318,7 @@ export default async function LeadsPage({
         groups={leadGroups}
         miscCount={miscCount}
         missingCountyCount={missingCountyCount}
+        missingTimezoneCount={missingTimezoneCount}
       />
       {/* Pack assignment moved to the Assignment Center (Phase 1 · D1) — one
           place to allocate, track, and rebalance work instead of an inline

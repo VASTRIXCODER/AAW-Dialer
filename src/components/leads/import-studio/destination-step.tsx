@@ -15,7 +15,7 @@ export interface Destination {
   /** Org group key, or "__misc__" for the Miscellaneous bucket (lead_group NULL). */
   group: string;
   campaignId: string;
-  packBy: "none" | "sequence" | "city";
+  packBy: "none" | "sequence" | "city" | "timezone";
   packSize: number;
 }
 
@@ -92,7 +92,8 @@ export function DestinationStep({
             Packs
           </span>
           <p className="mt-0.5 text-xs text-muted-foreground">
-            Deal a big list out a numbered pack at a time. Rows keep file order either way.
+            Deal a big list out a numbered pack at a time. Rows keep file order either way,
+            except by time zone, which orders packs east to west for regional dialing shifts.
           </p>
           <div className="mt-2 flex flex-wrap gap-1.5">
             {(
@@ -100,12 +101,18 @@ export function DestinationStep({
                 { v: "none", label: "No packs" },
                 { v: "sequence", label: "By file order" },
                 { v: "city", label: "By city" },
+                { v: "timezone", label: "By time zone" },
               ] as const
             ).map((o) => (
               <button
                 key={o.v}
                 type="button"
                 onClick={() => onChange({ ...dest, packBy: o.v })}
+                title={
+                  o.v === "timezone"
+                    ? "Each time zone gets its own pack, inferred from each lead's state and ZIP — Eastern first, Pacific last"
+                    : undefined
+                }
                 className={cn(
                   "rounded-lg px-2.5 py-1 text-xs font-semibold transition-colors",
                   dest.packBy === o.v
