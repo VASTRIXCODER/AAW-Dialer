@@ -4,6 +4,7 @@ import { isSolarVertical } from "@/lib/org/vertical";
 import { MaintenanceScreen } from "@/components/layout/maintenance-screen";
 import { PaywallScreen } from "@/components/layout/paywall-screen";
 import { isAIConfigured } from "@/lib/ai/claude";
+import { enforcedParallelCeiling } from "@/lib/db/abandonment";
 import { getAppSettings, isAccountDisabled } from "@/lib/db/app-control";
 import { listLeadGroups } from "@/lib/db/lead-groups";
 import { getUiPreferences } from "@/lib/db/team";
@@ -106,10 +107,22 @@ export default async function AppGroupLayout({
   );
   // The org's intake groups drive the dialer's group filter (labels only — the
   // dialer never needs the AI rule text), and the viewer's own dialer prefs
-  // come off their profile. No data dependency between the two.
-  const [orgLeadGroupsRaw, uiPreferences] = await Promise.all([
+  // come off their profile. enforcedHumanLines rides alongside: the org's
+  // OWN recent abandonment rate (lib/db/abandonment.ts) can lower the real
+  // ceiling below what Admin has configured, and the dialer must show that
+  // lowered number rather than offering "10X" only to have the dial route
+  // silently truncate every parallel session to 1 line with no visible reason.
+  const orgConfiguredLines = Math.max(
+    1,
+    Math.floor(Number(viewer.org?.settings.dialing.maxLines)) || MAX_PARALLEL_HUMAN,
+  );
+  const [orgLeadGroupsRaw, uiPreferences, enforcedHumanLines] = await Promise.all([
     listLeadGroups(viewer.org?.id ?? null),
     getUiPreferences(),
+    enforcedParallelCeiling({
+      orgId: viewer.org?.id ?? null,
+      orgConfiguredCeiling: orgConfiguredLines,
+    }),
   ]);
   const orgLeadGroups = orgLeadGroupsRaw.map((g) => ({
     key: g.key,
@@ -201,10 +214,12 @@ export default async function AppGroupLayout({
     dialScope,
     // The org's voice-plan concurrency allowance — the dialer holds itself to it.
     maxAiConcurrency: viewer.org?.settings.ai.maxConcurrentCalls ?? 10,
-    // Admin → Dialing → "Max lines". This was editable but never read, so every
-    // workspace got the platform maximum of 3 whatever it had been set to; a
-    // team that wants single-line dialing sets it to 1 and 2X/3X disappears.
-    maxHumanLines: viewer.org?.settings.dialing.maxLines ?? MAX_PARALLEL_HUMAN,
+    // Admin → Dialing → "Max lines", clamped by the org's OWN recent
+    // abandonment rate (enforcedHumanLines, computed above) — never the raw
+    // setting alone. A team that wants single-line dialing sets it to 1 and
+    // 2X/3X disappears; a team whose rate has climbed gets throttled the same
+    // way whether or not anyone remembered to check the Admin panel.
+    maxHumanLines: enforcedHumanLines,
     callerIdPool,
     callerIdRotateEvery,
     // Local presence default: dial from a pool number in the lead's own area

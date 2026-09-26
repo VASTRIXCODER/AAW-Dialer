@@ -200,3 +200,23 @@ describe("ElevenLabs voice override — allow-list gated like every override", (
     expect(built.override).toBeNull();
   });
 });
+
+describe("settings.dialing.maxLines — the 10x default", () => {
+  it("defaults to the platform ceiling, not the old value of 3", () => {
+    // A fresh org, never having touched Admin -> Dialing, now gets real 10x
+    // manual/parallel dialing SELECTABLE out of the box — matching how
+    // ai.maxConcurrentCalls already defaults to its own ceiling. "Selectable"
+    // is the operative word: this does not dial more lines on its own, it
+    // only raises what a rep can choose to click up to.
+    expect(DEFAULT_ORG_SETTINGS.dialing.maxLines).toBe(10);
+    expect(mergeSettings({}).dialing.maxLines).toBe(10);
+  });
+
+  it("never silently overwrites an org's own saved choice", () => {
+    // An org that explicitly configured 3 lines (or any other value) before
+    // this change keeps exactly that — the new default only ever fills a gap
+    // that was never actually set.
+    expect(mergeSettings({ dialing: { maxLines: 3 } }).dialing.maxLines).toBe(3);
+    expect(mergeSettings({ dialing: { maxLines: 1 } }).dialing.maxLines).toBe(1);
+  });
+});

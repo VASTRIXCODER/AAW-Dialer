@@ -20,6 +20,7 @@ import {
 } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
+import { AbandonmentRateReadout } from "@/components/admin/abandonment-rate-readout";
 import { useVocabulary } from "@/components/layout/vocabulary";
 import { SectionCard } from "@/components/shared/section-card";
 import { Button } from "@/components/ui/button";
@@ -551,6 +552,7 @@ export function OrgSettingsForm({
           </Field>
           <NumberField
             label="Max concurrent lines"
+            hint="Up to 10. The dialer may hold this LOWER automatically if your own abandonment rate climbs — see below."
             value={dialing.maxLines}
             onChange={(n) => setDialing({ ...dialing, maxLines: n })}
           />
@@ -577,6 +579,9 @@ export function OrgSettingsForm({
             value={dialing.rotateEvery}
             onChange={(n) => setDialing({ ...dialing, rotateEvery: Math.max(1, n) })}
           />
+        </div>
+        <div className="mt-4">
+          <AbandonmentRateReadout />
         </div>
         <div className="mt-4">
           {platformPoolLocked && !isSuperadmin ? (

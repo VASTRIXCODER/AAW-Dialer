@@ -4943,4 +4943,52 @@ $$;
 revoke all on function public.app_lead_field_averages(text, uuid, uuid) from public, anon;
 grant execute on function public.app_lead_field_averages(text, uuid, uuid) to authenticated, service_role;
 
+-- ═════════════════════════════════════════════════════════════════════════════
+-- ABANDONMENT-RATE TRACKING — added alongside raising parallel dialing to 10x
+-- ═════════════════════════════════════════════════════════════════════════════
+-- The FTC's Telemarketing Sales Rule (16 CFR §310.4(b)(4)) caps the ABANDONMENT
+-- RATE — calls a live person answers that don't reach a live agent within 2
+-- seconds — at 3%, measured per calling campaign over a rolling 30-day window.
+-- This app's own /terms page already promises customers that rate stays within
+-- legal limits. Raising how many lines ring at once directly raises how often
+-- two lines answer close enough together that only one can be greeted — so the
+-- ceiling change and this table are one change, not two.
+--
+-- One row per RESOLVED parallel round (every time /api/twilio/status's "release
+-- the losing legs" logic determines a winner). answered_count is how many of
+-- the round's lines were found genuinely answered — not still ringing — at that
+-- moment; 1 is clean (no collision), 2+ means that many minus one went
+-- ungreeted. See src/lib/dialer/abandonment.ts for the rate math this feeds,
+-- and src/lib/db/abandonment.ts for the read/write.
+create table if not exists public.dial_parallel_rounds (
+  id             uuid primary key default gen_random_uuid(),
+  org_id         uuid references public.organizations (id) on delete cascade,
+  room           text not null,
+  lines_dialed   int not null default 1,
+  answered_count int not null default 1,
+  created_at     timestamptz not null default now()
+);
+create index if not exists dial_parallel_rounds_org_time_idx
+  on public.dial_parallel_rounds (org_id, created_at);
+-- Service-role only (RLS on, no policies) — written by the Twilio status
+-- webhook (no signed-in user in that request) and read by the admin API route,
+-- both via the service-role client; never exposed to a browser directly.
+alter table public.dial_parallel_rounds enable row level security;
+
+-- Aggregated server-side rather than fetched row-by-row into JS: a high-volume
+-- org running near 10x lines for 30 days is exactly the org this table most
+-- needs to answer fast, and exactly the one a row-limited client fetch would
+-- silently under-count for.
+create or replace function public.app_abandonment_snapshot(p_org uuid, p_since timestamptz)
+returns table (answered bigint, abandoned bigint)
+language sql stable security definer set search_path = public as $$
+  select
+    coalesce(sum(answered_count), 0)::bigint,
+    coalesce(sum(greatest(answered_count - 1, 0)), 0)::bigint
+  from public.dial_parallel_rounds
+  where org_id = p_org and created_at >= p_since;
+$$;
+revoke all on function public.app_abandonment_snapshot(uuid, timestamptz) from public, anon, authenticated;
+grant execute on function public.app_abandonment_snapshot(uuid, timestamptz) to service_role;
+
 notify pgrst, 'reload schema';

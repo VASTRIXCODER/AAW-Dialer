@@ -8,6 +8,7 @@
 // `OrgBlueprint` is the full white-label spec the AI builder produces.
 // ─────────────────────────────────────────────────────────────────────────────
 
+import { MAX_PARALLEL_HUMAN } from "../dialer/parallel-limits";
 import { clampForwardTimeout } from "../inbound/routing";
 import type { LeadFieldDef } from "../leads/field-schema";
 import { sanitizeExportTemplates, type ExportTemplate } from "../leads/export-spec";
@@ -227,12 +228,18 @@ export const DEFAULT_MESSAGING: MessagingSettings = {
 export interface OrgSettings {
   dialing: {
     /**
-     * Which mode the dialer OPENS in for this workspace: manual, parallel (3X),
-     * or ai. "ai" silently falls back to manual for viewers who can't use the
-     * AI dialer (no permission / feature off / ElevenLabs unconfigured), and
-     * "parallel" falls back to manual when maxLines is 1.
+     * Which mode the dialer OPENS in for this workspace: manual, parallel
+     * (multi-line), or ai. "ai" silently falls back to manual for viewers who
+     * can't use the AI dialer (no permission / feature off / ElevenLabs
+     * unconfigured), and "parallel" falls back to manual when maxLines is 1.
      */
     defaultMode: "manual" | "parallel" | "ai";
+    /** Admin's own ceiling on simultaneous human lines, clamped to the platform
+     *  maximum (MAX_PARALLEL_HUMAN) — and, live, to whatever the org's own
+     *  recent abandonment rate allows (lib/db/abandonment.ts). Raising this
+     *  makes more lines SELECTABLE; it never dials more lines on its own — a
+     *  rep (or an org whose defaultMode is literally "parallel") still has to
+     *  choose to use them. */
     maxLines: number;
     /** Seconds an outbound leg rings before Twilio gives up (clamped 5–60). */
     ringTimeoutSec: number;
@@ -641,7 +648,14 @@ export const DEFAULT_ORG_SETTINGS: OrgSettings = {
     // whenever the viewer can actually use it, manual otherwise. Orgs that want
     // manual-first pick it in Admin → Dialing.
     defaultMode: "ai",
-    maxLines: 3,
+    // Matches the platform ceiling — not a "safe conservative default that
+    // happens to equal the old ceiling." An org that's never touched this
+    // setting now gets real 10x manual/parallel dialing SELECTABLE, exactly
+    // like ai.maxConcurrentCalls already defaults to its own ceiling below.
+    // "Selectable" is the operative word: this raises what a rep CAN choose,
+    // never what dials on its own — see the field's doc comment above, and
+    // lib/db/abandonment.ts for what keeps that safe in practice.
+    maxLines: MAX_PARALLEL_HUMAN,
     ringTimeoutSec: 25,
     recording: true,
     // Opt-in: speech-to-text bills per minute, so an admin turns it on.

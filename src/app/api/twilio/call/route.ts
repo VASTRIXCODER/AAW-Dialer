@@ -1,8 +1,10 @@
 import { NextResponse } from "next/server";
 import { registerRoom } from "@/lib/call-registry";
 import { recordDialRequested } from "@/lib/calls/apply-event";
+import { enforcedParallelCeiling } from "@/lib/db/abandonment";
 import { dncKey, getDncDigits } from "@/lib/db/dnc";
 import { resolveLeadTimezone } from "@/lib/dialer/lead-timezone";
+import { MAX_PARALLEL_HUMAN } from "@/lib/dialer/parallel-limits";
 import { placeLegWithRetry } from "@/lib/dialer/place-call";
 import { findRecentLegs, orgCallerIdSet } from "@/lib/dialer/recover-legs";
 import { type CallerIdInfo, nextCallerIdWithInfo } from "@/lib/dialer/rotation-server";
@@ -133,11 +135,21 @@ export async function POST(req: Request) {
 
   // Cap parallel legs server-side. The browser enforces this, but the route must
   // too — otherwise one crafted request could ring hundreds of homeowners into a
-  // single conference. Mirror the client's MAX_PARALLEL_HUMAN ceiling and honor a
-  // lower per-org "Max lines" setting.
-  const SERVER_MAX_PARALLEL = 3;
-  const orgMaxLines = Math.floor(Number(orgSettings?.dialing.maxLines) || SERVER_MAX_PARALLEL);
-  const lineCap = Math.min(Math.max(1, orgMaxLines), SERVER_MAX_PARALLEL);
+  // single conference. Honor a lower per-org "Max lines" setting under the
+  // platform ceiling — imported, not hand-duplicated: this used to be a local
+  // `SERVER_MAX_PARALLEL = 3` literal the client's real ceiling could silently
+  // drift past (bump MAX_PARALLEL_HUMAN in one place, forget this one, and
+  // every rep's "10X" session quietly places 3 real Twilio legs).
+  const orgMaxLines = Math.floor(Number(orgSettings?.dialing.maxLines) || MAX_PARALLEL_HUMAN);
+  // The org's OWN recent abandonment rate can lower this further — see
+  // lib/db/abandonment.ts. This is the enforcement half of raising the
+  // platform ceiling to 10: a bad rate throttles the org back to single-line
+  // dialing automatically, rather than waiting on someone to notice a report.
+  const abandonmentCeiling = await enforcedParallelCeiling({
+    orgId: viewer.org?.id ?? null,
+    orgConfiguredCeiling: Math.max(1, orgMaxLines),
+  });
+  const lineCap = Math.min(Math.max(1, orgMaxLines), MAX_PARALLEL_HUMAN, abandonmentCeiling);
   let dialLeads = leads.slice(0, lineCap);
 
   // Enforced calling hours (Admin → Calling hours → "Block dialing outside
@@ -305,7 +317,7 @@ export async function POST(req: Request) {
     });
   }
 
-  registerRoom(room, placed);
+  registerRoom(room, placed, viewer.org?.id ?? null);
 
   // Canonical attempts (dual-write): one call_attempts row per dialed lead,
   // keyed (room, lead_id) so every later webhook resolves its attempt. The

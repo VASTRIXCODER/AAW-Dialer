@@ -3,8 +3,9 @@ import {
   applyTwilioCallStatus,
   TERMINAL_STATUSES,
 } from "@/lib/ai-call-state";
-import { losingLegs, markAnswered } from "@/lib/call-registry";
+import { losingLegs, markAnswered, roomRoundInfo } from "@/lib/call-registry";
 import { applyCallEvent, twilioEventTypeForStatus } from "@/lib/calls/apply-event";
+import { recordParallelRound } from "@/lib/db/abandonment";
 import { providerEventFingerprint } from "@/lib/calls/state-machine";
 import { kickTranscription } from "@/lib/db/transcribe-call";
 import {
@@ -184,6 +185,13 @@ export async function POST(req: Request) {
       const client = await getRestClient();
       if (client) {
         const STILL_RINGING = new Set(["queued", "initiated", "ringing"]);
+        // Abandonment-rate tracking (lib/dialer/abandonment.ts): a losing leg
+        // found NOT still ringing here was genuinely answered by a human (or
+        // machine) at the exact moment another line became the rep's call —
+        // that is the real, FTC-relevant event. This is why the release logic
+        // above never hangs up an answered leg: doing so wouldn't erase the
+        // abandonment, only hide the count of it.
+        let answeredLosers = 0;
         await Promise.all(
           losingLegs(room, leadId).map(async (leg) => {
             if (!leg.sid) return;
@@ -191,12 +199,28 @@ export async function POST(req: Request) {
               const c = await client.calls(leg.sid).fetch();
               if (STILL_RINGING.has(c.status)) {
                 await client.calls(leg.sid).update({ status: "completed" });
+              } else {
+                answeredLosers += 1;
               }
             } catch {
-              /* leg already gone — nothing to release */
+              /* leg already gone — nothing to release, and nothing to count:
+                 a leg Twilio has no record of was never confirmed answered. */
             }
           }),
         );
+        // Only true PARALLEL rounds (2+ lines) are compliance-relevant here —
+        // a plain single-line manual call has no collision risk to measure,
+        // and mixing it in would dilute the rate with clean calls that were
+        // never at risk, hiding a real problem concentrated in parallel mode.
+        const info = roomRoundInfo(room);
+        if (info && info.linesDialed > 1) {
+          recordParallelRound({
+            orgId: info.orgId,
+            room,
+            linesDialed: info.linesDialed,
+            answeredCount: 1 + answeredLosers,
+          });
+        }
       }
     }
   }

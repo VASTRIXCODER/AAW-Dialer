@@ -244,8 +244,20 @@ export function AiSessionView({
         <div className="mx-auto mb-3 flex h-16 w-16 items-center justify-center rounded-2xl bg-brand shadow-glow">
           <Bot className="h-8 w-8 text-white" />
         </div>
-        <h2 className="text-lg font-bold">
+        <h2 className="flex items-center justify-center gap-2 text-lg font-bold">
           {campaign === "done" ? "Campaign complete" : `${agentName} is calling`}
+          {/* How many lines this session is ACTUALLY running at, visible the
+              whole time a campaign runs — not just a one-time chip on the
+              idle screen a rep might never have looked at. Answers "is this
+              really running at 10x" at a glance instead of by counting rows. */}
+          {campaign !== "done" && state.parallelCount > 1 && (
+            <span
+              className="rounded-full bg-accent-soft px-2 py-0.5 text-xs font-bold text-accent"
+              title={`Running ${state.parallelCount} calls at once (max ${state.maxParallel}) — change it from the Start screen before your next session.`}
+            >
+              {state.parallelCount}X
+            </span>
+          )}
         </h2>
         <p className="mt-1 text-sm text-muted-foreground">
           {campaign === "running"

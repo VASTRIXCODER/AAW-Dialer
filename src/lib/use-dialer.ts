@@ -20,6 +20,7 @@ import { aiDialInFlight } from "./dialer/ai-redial";
 import { dedupeLeadsByPhone } from "./dialer/lane-dedupe";
 import { persistDisposition } from "./dialer/disposition-queue";
 import { decideMuteToggle, type MuteCapability } from "./dialer/mute-intent";
+import { MAX_PARALLEL_AI, MAX_PARALLEL_HUMAN } from "./dialer/parallel-limits";
 import type { DialerUserPrefs } from "./dialer/user-prefs";
 import type { AgentKey } from "./elevenlabs";
 import type { CallOutcome, Lead } from "./types";
@@ -409,15 +410,76 @@ const AI_PUMP_MS = 5_000;
  */
 const AI_SLOT_MAX_MS = 12 * 60_000;
 
-/** A human rep can only talk to one answered line — more just abandons calls. */
-export const MAX_PARALLEL_HUMAN = 3;
-/** Platform ceiling for AI concurrency; the org's plan limit applies on top. */
-export const MAX_PARALLEL_AI = 30;
+// Imported (not re-declared) from a pure, server-safe sibling — see that
+// file's header for why the two constants used to drift — then re-exported so
+// every existing `import { MAX_PARALLEL_HUMAN } from "@/lib/use-dialer"` still
+// resolves. A bare `export { X } from "./y"` does NOT bind X into this file's
+// own scope, and both constants are used throughout the rest of this hook.
+export { MAX_PARALLEL_HUMAN, MAX_PARALLEL_AI };
 
 /** One derivation for the mode word, so every setter that moves aiMode or
  *  parallelCount computes sessionMode identically and the two can't drift. */
 function deriveSessionMode(aiMode: boolean, parallelCount: number): SessionMode {
   return aiMode ? "ai" : parallelCount > 1 ? "parallel" : "manual";
+}
+
+/**
+ * The concurrency a fresh session boots at. Pure and exported so this exact
+ * contract is pinned by a test, independent of mounting the hook.
+ *
+ * AI mode ALWAYS starts at the org's configured ceiling (Admin → AI settings
+ * → "Max concurrent calls") — that setting IS the org's stated intent for how
+ * many lines the agent should run, not a cap a rep has to remember to click
+ * up to every session. Before this existed, AI boot always landed on 1
+ * regardless of the setting: the ceiling said 10, the actual dial count
+ * silently said 1, and "the AI dialer isn't running 10x" was true every
+ * single session until someone clicked the parallel-count button row.
+ *
+ * Manual mode keeps its own, deliberately different default: the org's
+ * default mode, or the rep's own "default to full parallel" preference —
+ * either way only for a manual boot with room. A human rep opting INTO
+ * multiple ringing lines is a real decision with real abandonment risk, so it
+ * stays behind an explicit choice rather than defaulting on.
+ */
+export function bootParallelCount(input: {
+  bootAiMode: boolean;
+  initialMode: "manual" | "parallel" | "ai";
+  maxAiConcurrency: number;
+  humanCeiling: number;
+  parallelDefaultPref: boolean;
+}): number {
+  if (input.bootAiMode) {
+    return Math.max(1, Math.min(MAX_PARALLEL_AI, input.maxAiConcurrency));
+  }
+  return input.initialMode === "parallel" || input.parallelDefaultPref
+    ? Math.max(1, input.humanCeiling)
+    : 1;
+}
+
+/**
+ * The concurrency to land on when TOGGLING modes mid-session. Pure and
+ * exported for the same reason as bootParallelCount above.
+ *
+ * The two directions are NOT symmetric, on purpose:
+ *   - Entering AI mode JUMPS STRAIGHT to the org's configured AI ceiling.
+ *     The whole point of an org setting 10 concurrent calls is that AI mode
+ *     runs at 10 — not "at whatever number manual mode was left on, capped
+ *     at 10" (which for a typical manual session is 1, so this had the exact
+ *     same silent-1x bug as the boot path).
+ *   - Leaving AI mode only ever CLAMPS DOWN. A human rep genuinely cannot
+ *     hold ten answered lines, so carrying "10" over to manual would abandon
+ *     nine homeowners on the spot.
+ */
+export function parallelCountOnModeSwitch(input: {
+  enteringAi: boolean;
+  current: number;
+  maxAiConcurrency: number;
+  humanCeiling: number;
+}): number {
+  const ceiling = input.enteringAi
+    ? Math.max(1, Math.min(MAX_PARALLEL_AI, input.maxAiConcurrency))
+    : input.humanCeiling;
+  return input.enteringAi ? ceiling : Math.min(input.current, ceiling);
 }
 
 export function useDialer(
@@ -459,15 +521,30 @@ export function useDialer(
   // the absent-key default — so nothing changes until an admin picks otherwise.
   const initialMode = options.initialMode ?? "ai";
   const bootAiMode = aiConfigured && initialMode === "ai";
-  // Parallel at boot: the org's default mode, or the rep's own "default to
-  // full parallel" preference — either way only for a manual boot with room.
-  const bootParallelCount =
-    !bootAiMode && (initialMode === "parallel" || options.userPrefs?.parallelDefault)
-      ? Math.max(1, humanCeiling)
-      : 1;
+  // Parallel at boot. AI mode ALWAYS starts at the org's configured AI
+  // concurrency (Admin → AI settings → "Max concurrent calls", 10 by
+  // default) — that setting IS the org's stated intent for how many lines
+  // the agent should run, not a ceiling a rep has to remember to click up to
+  // every session. Before this, AI boot always landed on 1 regardless of the
+  // setting: the ceiling said 10, the actual dial count silently said 1,
+  // and "the AI dialer isn't running 10x" was true every single session
+  // until someone clicked the button row.
+  //
+  // Manual mode keeps its own, deliberately different default: the org's
+  // default mode, or the rep's own "default to full parallel" preference —
+  // either way only for a manual boot with room. A human rep opting INTO
+  // multiple ringing lines is a real decision with real abandonment risk, so
+  // it stays behind an explicit choice rather than defaulting on.
+  const initialParallelCount = bootParallelCount({
+    bootAiMode,
+    initialMode,
+    maxAiConcurrency,
+    humanCeiling,
+    parallelDefaultPref: options.userPrefs?.parallelDefault ?? false,
+  });
   const [state, setState] = useState<DialerState>({
     status: "idle",
-    sessionMode: deriveSessionMode(bootAiMode, bootParallelCount),
+    sessionMode: deriveSessionMode(bootAiMode, initialParallelCount),
     lines: [],
     connectedLead: null,
     durationSec: 0,
@@ -476,7 +553,7 @@ export function useDialer(
     onHold: false,
     recording: recordingEnabled,
     autoDial: options.userPrefs?.autoDialNext ?? false,
-    parallelCount: bootParallelCount,
+    parallelCount: initialParallelCount,
     maxParallel: bootAiMode ? maxAiConcurrency : humanCeiling,
     lastOutcome: null,
     mode: "connecting",
@@ -549,7 +626,7 @@ export function useDialer(
   // Start button silently launch an AI SESSION from a UI that said Manual.
   // (Caught by review — the org's manual-first choice inverted into AI calls.)
   const autoDialRef = useRef(options.userPrefs?.autoDialNext ?? false);
-  const parallelRef = useRef(bootParallelCount);
+  const parallelRef = useRef(initialParallelCount);
   const modeRef = useRef<DialerMode>("connecting");
   const aiModeRef = useRef(bootAiMode);
   const activeAgentRef = useRef<AgentKey>("primary");
@@ -3036,13 +3113,18 @@ export function useDialer(
       convLeadRef.current.clear();
       aiLeadByIdRef.current.clear();
 
-      // Re-clamp: the ceilings differ per mode. Switching AI(10x) -> human without
-      // this would leave one rep with ten lines ringing, and nine of those
-      // homeowners would answer to nobody.
+      // See parallelCountOnModeSwitch's doc comment: entering AI jumps
+      // straight to the org's configured ceiling; leaving it only clamps
+      // down, because a human rep genuinely cannot hold ten answered lines.
       const ceiling = next
         ? Math.max(1, Math.min(MAX_PARALLEL_AI, maxAiRef.current))
         : humanCeilingRef.current;
-      parallelRef.current = Math.min(parallelRef.current, ceiling);
+      parallelRef.current = parallelCountOnModeSwitch({
+        enteringAi: next,
+        current: parallelRef.current,
+        maxAiConcurrency: maxAiRef.current,
+        humanCeiling: humanCeilingRef.current,
+      });
 
       patch({
         aiMode: next,

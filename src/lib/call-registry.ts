@@ -20,6 +20,10 @@ interface RoomState {
   createdAt: number;
   answeredLeadId: string | null;
   legs: CallLeg[];
+  /** The dialing org, so a round's outcome can be attributed for abandonment-
+   *  rate tracking (src/lib/dialer/abandonment.ts) without a DB round-trip
+   *  from the Twilio webhook that resolves it. */
+  orgId: string | null;
 }
 
 const rooms = new Map<string, RoomState>();
@@ -32,9 +36,9 @@ function sweep() {
   }
 }
 
-export function registerRoom(room: string, legs: CallLeg[]) {
+export function registerRoom(room: string, legs: CallLeg[], orgId: string | null = null) {
   sweep();
-  rooms.set(room, { createdAt: Date.now(), answeredLeadId: null, legs });
+  rooms.set(room, { createdAt: Date.now(), answeredLeadId: null, legs, orgId });
 }
 
 /** Records the first answered leg. Returns true if this was the winning answer. */
@@ -55,4 +59,13 @@ export function losingLegs(room: string, winnerLeadId: string): CallLeg[] {
   const state = rooms.get(room);
   if (!state) return [];
   return state.legs.filter((l) => l.leadId !== winnerLeadId && l.sid);
+}
+
+/** The org that placed this round's legs, and how many there were —
+ *  everything abandonment-rate tracking needs about the round besides the
+ *  live-answer count it discovers by fetching each leg's Twilio status. */
+export function roomRoundInfo(room: string): { orgId: string | null; linesDialed: number } | null {
+  const state = rooms.get(room);
+  if (!state) return null;
+  return { orgId: state.orgId, linesDialed: state.legs.filter((l) => l.sid).length };
 }
